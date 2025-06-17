@@ -1,0 +1,323 @@
+import os
+import flet as ft
+import json
+import logging
+from pathlib import Path
+from typing import List
+from openpyxl.reader.excel import load_workbook
+
+# Configuração de logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# Verificação de permissões para Android
+try:
+    from android.permissions import Permission, request_permissions
+    ANDROID = True
+except ImportError:
+    ANDROID = False
+
+def verificar_permissoes():
+    """Solicita permissões no Android, se necessário."""
+    if ANDROID:
+        try:
+            request_permissions([Permission.READ_EXTERNAL_STORAGE, Permission.WRITE_EXTERNAL_STORAGE])
+            logger.info("Permissões concedidas com sucesso.")
+        except Exception as e:
+            logger.error(f"Erro ao solicitar permissões: {e}")
+
+if ANDROID:
+    verificar_permissoes()
+
+class FileManager:
+    """Gerenciamento de arquivos essenciais."""
+
+    @staticmethod
+    def get_assets_dir() -> Path:
+        """Obtém o diretório de assets."""
+        return Path("assets")
+
+    @staticmethod
+    def setup_files() -> Path:
+        """Configura diretório e verifica arquivos necessários dentro da pasta assets."""
+        assets_dir = FileManager.get_assets_dir() / "App_ptro"
+        if not assets_dir.exists():
+            logger.error(f"Diretório de assets não encontrado: {assets_dir}")
+        return assets_dir
+
+    def read_excel_column(caminho: str, coluna: int) -> List[str]:
+        """Lê os dados de uma coluna específica em um arquivo Excel."""
+        try:
+            workbook = load_workbook(caminho)
+            sheet = workbook.active  # Seleciona a aba ativa
+            dados = [sheet.cell(row=row, column=coluna).value for row in range(1, sheet.max_row + 1)]
+            workbook.close()
+            return dados
+        except FileNotFoundError:
+            logger.error(f"Arquivo Excel não encontrado: {caminho}")
+            return ["Erro: Arquivo não encontrado"]
+        except Exception as e:
+            logger.error(f"Erro ao acessar os dados: {e}")
+            return [f"Erro ao acessar os dados: {e}"]
+
+    @staticmethod
+    def load_json_file() -> Path:
+        """Carrega o arquivo JSON dentro da pasta assets."""
+        json_path = FileManager.get_assets_dir() / r"App_ptro/modelo.json"
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            logger.error(f"Arquivo JSON não encontrado em {json_path}")
+            return {}
+        except Exception as e:
+            logger.error(f"Erro ao carregar o arquivo JSON: {e}")
+            return {}
+
+    @staticmethod
+    def normalize_code(code: str) -> str:
+        """Remove espaços e mantém apenas números."""
+        return code.replace(".", "").strip()
+
+    @staticmethod
+    def format_code(code: str) -> str:
+        """Formata o código no padrão XX.XXX.XXX."""
+        normalized = FileManager.normalize_code(code)
+        if len(normalized) == 8:
+            return f"{normalized[:2]}.{normalized[2:5]}.{normalized[5:]}"
+        return code
+
+    @staticmethod
+    def search_description(codigo: str) -> tuple[str, str]:
+        """Busca descrição e campos adicionais pelo código no arquivo JSON."""
+        try:
+            data = FileManager.load_json_file()  # Carrega o JSON como uma lista
+            formatted_code = FileManager.format_code(codigo)  # Formata o código para a busca
+
+            # Itera diretamente sobre a lista de objetos
+            for item in data:
+                if item.get('Material', '').strip() == formatted_code:
+                    descricao = item.get('Descrição', '').strip()
+                    adicionais = item.get('Adicionais', '').strip()
+
+                    if not adicionais:
+                        adicionais = "Nenhum adicional disponível"
+
+                    return descricao, adicionais
+
+            return "Código não encontrado!", "Nenhum adicional disponível"
+        except Exception as e:
+            logger.error(f"Erro ao buscar descrição: {e}")
+            return "Erro ao acessar os dados.", "Nenhum adicional disponível"
+
+    @staticmethod
+    def find_photos(codigo: str) -> List[str]:
+        """Busca fotos relacionadas ao código."""
+        fotos = []
+        formatted_code = FileManager.format_code(codigo)
+        asset_dir = FileManager.get_assets_dir() / "App_ptro"
+        try:
+            for asset in asset_dir.iterdir():
+                if asset.name.startswith(formatted_code) and asset.suffix.lower() in [".jpg", ".jpeg"]: # Apenas JPG
+                    fotos.append(str(asset))
+        except Exception as e:
+            logger.error(f"Erro ao buscar fotos nas assets: {e}")
+
+        if not fotos:
+            default_photo_asset = asset_dir / "sem foto.jpg"
+            if default_photo_asset.exists():
+                fotos.append(str(default_photo_asset))
+
+        logger.info(f"Fotos encontradas para o código {codigo}: {fotos}")
+        return fotos
+
+
+def verificar_permissoes():
+    """Solicita permissões no Android, se necessário."""
+    if ANDROID:
+        try:
+            request_permissions([Permission.READ_EXTERNAL_STORAGE, Permission.WRITE_EXTERNAL_STORAGE])
+        except Exception as e:
+            logger.error(f"Erro ao solicitar permissões: {e}")
+
+
+def main(page: ft.Page):
+    """Interface principal."""
+    page.title = "Busca de Materiais"
+    page.theme_mode = ft.ThemeMode.SYSTEM
+
+    # Centralização da página principal
+    page.vertical_alignment = ft.MainAxisAlignment.CENTER
+    page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
+    assets_dir = FileManager.setup_files()
+
+    # Elementos
+    codigo_input = ft.TextField(label="Código do material", width=300, color="black")
+    resultado_text = ft.Text(
+        "Digite o código e clique em Buscar.",
+        weight="bold",
+        color="black",
+        size=20  # Define o tamanho da fonte maior
+    )
+    container_fotos = ft.Row(wrap=True, scroll="auto")
+
+    def abrir_pagina_foto(foto):
+        """Abre uma nova página com a foto em foco e botões de controle."""
+        scale = 1.0
+
+        def zoom_in(e):
+            nonlocal scale
+            scale = min(scale + 0.1, 3.0)
+            image.scale = scale
+            page.update()
+
+        def zoom_out(e):
+            nonlocal scale
+            scale = max(scale - 0.1, 0.5)
+            image.scale = scale
+            page.update()
+
+        def voltar(e):
+            page.views.pop()
+            page.go("/")
+
+        image = ft.Image(src=foto, width=page.width * 0.8, height=page.height * 0.8, fit=ft.ImageFit.CONTAIN)
+
+        page.views.append(
+            ft.View(
+                route="/foto",
+                controls=[
+                    ft.Column(
+                        [
+                            image,
+                            ft.Row(
+                                [
+                                    ft.ElevatedButton("Zoom In", on_click=zoom_in),
+                                    ft.ElevatedButton("Zoom Out", on_click=zoom_out),
+                                    ft.ElevatedButton("Voltar", on_click=voltar),
+                                ],
+                                alignment=ft.MainAxisAlignment.SPACE_EVENLY,
+                            ),
+                        ],
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=20,
+                    )
+                ],
+            )
+        )
+        page.go("/foto")
+
+    def buscar_codigo(e):
+        """Busca o código e atualiza a interface com dados vinculados do Excel."""
+        codigo = codigo_input.value.strip()
+        if not codigo:
+            resultado_text.value = "Código inválido!"
+        else:
+            resultado_text.value = FileManager.search_description(codigo)
+            fotos = FileManager.find_photos(codigo)
+            container_fotos.controls = [
+                ft.Container(
+                    ft.Image(src=f, width=200, height=200, fit=ft.ImageFit.CONTAIN),
+                    on_click=lambda e, f=f: abrir_pagina_foto(f),
+                    padding=5
+                ) for f in fotos
+            ]
+        page.update()
+
+    def dados_adicionais(e):
+        """
+        Verifica os dados adicionais para identificar o tipo de material (Tubo, Haste ou outros)
+        e abre o arquivo correspondente.
+        """
+
+        caminho_tubo = r"assets\Tubos.pdf"
+        caminho_haste = r"assets\Hastes.pdf"
+        caminho_outros = r""
+
+        try:
+            # Obtém o código do material digitado
+            codigo = codigo_input.value.strip()
+            if not codigo:
+                resultado_text.value = "Código inválido!"
+                return
+
+            # Busca a descrição e os adicionais no JSON
+            descricao, adicionais = FileManager.search_description(codigo)
+
+            # Exibe os valores no console para depuração
+            print(f"Descrição encontrada: {descricao}")
+            print(f"Adicionais encontrados: {adicionais}")
+
+            # Verifica o tipo de material nos adicionais e abre o arquivo correspondente
+            if "Haste" in adicionais:
+                os.startfile(caminho_haste)  # Abre o arquivo PDF para Haste
+                resultado_text.value = f"Abrindo o arquivo ENCONTREI HASTES: {caminho_haste}"
+
+            elif "Tubo" in adicionais:
+                os.startfile(caminho_tubo)  # Abre o arquivo PDF para Tubo
+                resultado_text.value = f"Abrindo o arquivo ENCONTREI TUBO: {caminho_tubo}"
+
+            else:
+                os.startfile(caminho_outros)  # Abre o arquivo PDF para outros materiais
+                resultado_text.value = f"Abrindo o arquivo padrão: {caminho_outros}"
+
+        except FileNotFoundError:
+            resultado_text.value = "Erro: Arquivo Excel ou PDF não encontrado."
+        except Exception as e:
+            resultado_text.value = f"Erro ao executar a operação: {e}"
+
+        page.update()
+
+    def read_excel_column(caminho: str, coluna: int) -> List[str]:
+        """Lê os dados de uma coluna específica em um arquivo Excel."""
+        try:
+            workbook = load_workbook(caminho)
+            sheet = workbook.active  # Seleciona a aba ativa
+            dados = [sheet.cell(row=row, column=coluna).value for row in range(1, sheet.max_row + 1)]
+            workbook.close()
+            return dados
+        except FileNotFoundError:
+            logger.error(f"Arquivo Excel não encontrado: {caminho}")
+            return ["Erro: Arquivo não encontrado"]
+        except Exception as e:
+            logger.error(f"Erro ao acessar os dados: {e}")
+            return [f"Erro ao acessar os dados: {e}"]
+
+    # Interface da página
+    background = ft.Image(
+        src="assets/WhatsApp.png",
+        width=page.width,
+        height=page.height,
+        fit=ft.ImageFit.COVER,
+    )
+
+    page.add(
+        ft.Stack(
+            [
+                background,
+                ft.Container(
+                    content=ft.Column(
+                        [
+                            ft.Text("Busca de Materiais", size=24, weight="bold", color="black"),
+                            codigo_input,
+                            ft.ElevatedButton("Buscar", on_click=buscar_codigo, color="blue"),
+                            ft.ElevatedButton("Dados Adicionais", on_click=dados_adicionais, color="blue"),
+                            resultado_text,
+                            ft.Text("Fotos Encontradas:", color="black"),
+                            container_fotos,
+                        ],
+                        alignment=ft.MainAxisAlignment.CENTER,
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=20,
+                    ),
+                    alignment=ft.alignment.center,
+                ),
+            ]
+        )
+    )
+
+    if ANDROID:
+        verificar_permissoes()
+
+ft.app(target=main, assets_dir="assets")
